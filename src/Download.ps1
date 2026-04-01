@@ -1,0 +1,1 @@
+Download-File $URL -Destination $InstallerFile
