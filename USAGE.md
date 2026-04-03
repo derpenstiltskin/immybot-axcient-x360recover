@@ -186,7 +186,7 @@ Choose "Add Software to New Software"
 | | |
 |---|---|
 | **Repair Strategy:**  | None               |
-| **Hideen:**           | Unchecked          |
+| **Hidden:**           | Unchecked          |
 
 | | |
 |---|---|

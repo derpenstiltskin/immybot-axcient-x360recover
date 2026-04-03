@@ -3,19 +3,28 @@
 # Uses ImmyBot's Start-ProcessWithLogTail to stream installer logs in real time.
 # ============================================================================
 
+$ArgumentList = @{}
+
 # Retrieve the agent install token provisioned for the current tenant
 $AgentInstallToken = Get-IntegrationAgentInstallToken
 
 # Determine backup target: local appliance (SERVER) or direct-to-cloud (TOKENID)
-$BackupType = $ApplianceIPAddress ? "SERVER=$ApplianceIPAddress" : "TOKENID=$AgentInstallToken"
+if ($null -ne $ApplianceIPAddress) {
+    $ArgumentList += @{SERVER=$ApplianceIPAddress}
+} elseif ($null -ne $AgentInstallToken) {
+    $ArgumentList += @{TOKENID=$AgentInstallToken}
+} else {
+    throw "No Appliance IP address or Agent Token found."
+}
 
 # Configure system tray icon visibility based on deployment preference
-$TrayIcon = $ShowTrayIcon ? "ENABLE_SYSTRAY=true" : "ENABLE_SYSTRAY=false"
+if ($ShowTrayIcon) {
+    $ArgumentList += @{ENABLE_SYSTRAY=true}
+} else {
+    $ArgumentList += @{ENABLE_SYSTRAY=false}
+}
 
-# Build MSI arguments: silent install, verbose logging, suppress reboot
-$ArgumentList = " /qn /l*v '$InstallerLogFile' REBOOT=REALLYSUPPRESS /norestart $BackupType $TrayIcon"
-
-# Execute the installer with a 15-minute timeout, tailing the log file for output
-Start-ProcessWithLogTail -Path $InstallerFile -LogFilePath $InstallerLogFile -TimeoutSeconds 900 -ArgumentList $ArgumentList
+# Execute the installer, tailing the log file for output
+Install-MSI -Path $InstallerFile -MSIParameters $ArgumentList -Tail
 
 return
