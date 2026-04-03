@@ -60,7 +60,7 @@ In the Script Editor, create a new script with the following settings:
 | **Execution Content:** | MetaScript                                            |
 | **Language:**          | PowerShell                                            |
 
-Copy the contents of [src/Download.ps1](src/Install.ps1) to the script and save.
+Copy the contents of [src/Installation.ps1](src/Installation.ps1) to the script and save.
 
 ### Configuration Task
 
