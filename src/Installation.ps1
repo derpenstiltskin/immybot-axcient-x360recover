@@ -1,6 +1,6 @@
 # ============================================================================
 # Performs a silent MSI installation of the Axcient x360Recover backup agent.
-# Uses ImmyBot's Start-ProcessWithLogTail to stream installer logs in real time.
+# Uses ImmyBot's Install-MSI with Tail to stream installer logs in real time.
 # ============================================================================
 
 $ArgumentList = @{}
