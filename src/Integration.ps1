@@ -55,7 +55,6 @@ function Invoke-AxcientX360RecoverRestMethod {
     # Attach query parameters for GET requests
     if (($Method -eq "GET") -and ($QueryParams.Count -gt 0)) {
         $RequestParams["Body"] = $QueryParams
-        throw "$($RequestParams | Out-String)"
     }
 
     # Attach body payload for POST requests
