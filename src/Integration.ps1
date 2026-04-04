@@ -1,345 +1,222 @@
 # ============================================================================
-# AxcientX360RecoverAPI — PowerShell module providing wrapper functions for
-# the Axcient x360Recover REST API. Used by the ImmyBot dynamic integration.
+# ImmyBot dynamic integration for the Axcient x360Recover backup platform.
+#
+# Capabilities:
+#   - ISupportsListingClients:          Enumerates active, non-parked clients
+#   - ISupportsListingAgents:           Lists Windows backup agents per client
+#   - ISupportsInventoryIdentification: Identifies agents via local config GUID
+#   - ISupportsTenantInstallToken:      Retrieves D2C agent install tokens
+#   - ISupportsDynamicVersions:         Resolves latest agent installer version
 # ============================================================================
 
-function Invoke-AxcientX360RecoverRestMethod {
-    <#
-    .SYNOPSIS
-        Sends an authenticated request to the Axcient x360Recover API.
-    .DESCRIPTION
-        Constructs and executes REST API calls against the x360Recover API using
-        credentials stored in $IntegrationContext. Includes automatic retry logic
-        for rate-limiting (429), forbidden (403), and gateway timeout (504) responses.
-    .PARAMETER Method
-        HTTP method to use. Defaults to GET.
-    .PARAMETER Endpoint
-        API endpoint path (appended to the base URL). Example: "client" or "device/123".
-    .PARAMETER Body
-        Request body for POST requests. Ignored for other methods.
-    .PARAMETER QueryParams
-        Hashtable of query string parameters for GET requests.
-    .PARAMETER MaxRetries
-        Maximum number of retry attempts for retryable errors. Defaults to 3.
-    .OUTPUTS
-        The deserialized API response object.
-    #>
-    [Cmdletbinding()]
+# ---- Integration initialization and credential validation ----
+$Integration = New-DynamicIntegration -Init {
     param(
-        [ValidateSet("GET", "POST", "HEAD")]
-        [string] $Method = "GET",
         [Parameter(Mandatory = $true)]
-        [string] $Endpoint,
+        [DisplayName("API Key")]
+        [Password(StripValue = $true)]
+        $ApiKey,
+        [Parameter(Mandatory = $true)]
+        [DisplayName("Vault ID")]
+        [int] $VaultId,
         [Parameter(Mandatory = $false)]
-        $Body,
-        [Parameter(Mandatory = $false)]
-        [HashTable] $QueryParams = @{},
-        [Parameter(Mandatory = $false)]
-        [int] $MaxRetries = 3
+        [DisplayName("API Base URL")]
+        [string] $ApiBaseUrl = "https://axapi.axcient.com"
     )
+    Import-Module AxcientX360RecoverAPI
 
-    Write-Verbose "Axcient x360Recover API Base URL: $($IntegrationContext.ApiBaseUrl)"
+    # Store credentials and configuration in the shared integration context
+    $IntegrationContext.ApiKey = $ApiKey
+    $IntegrationContext.ApiBaseUrl = $ApiBaseUrl
+    $IntegrationContext.VaultId = $VaultId
 
-    # Build the full URL by appending the endpoint to the base URL
-    [Uri] $Url = "$($IntegrationContext.ApiBaseUrl.ToString().TrimEnd('/'))/x360recover/$Endpoint"
-
-    $RequestParams = [ordered] @{
-        Uri = $Url
-        Method = $Method
-        ContentType = "application/json"
-        Headers = @{
-            "X-Api-Key" = "$($IntegrationContext.ApiKey)"
-        }
+    # Validate API connectivity before accepting the configuration
+    if (!(Test-AxcientX360RecoverConnection)) {
+        throw "Unable to connect to the Axcient x360Recover API with the supplied API Key."
     }
 
-    # Attach query parameters for GET requests
-    if (($Method -eq "GET") -and ($QueryParams.Count -gt 0)) {
-        $RequestParams["Body"] = $QueryParams
+    # Validate that the vault exists and is active
+    if (!(Test-AxcientX360RecoverVault)) {
+        throw "The supplied Axcient x360Recover Vault ID is either invalid or inactive."
     }
 
-    # Attach body payload for POST requests
-    if (($Method -eq "POST") -and ($null -ne $Body)) {
-        $RequestParams["Body"] = $Body
-    }
+    $IntegrationContext.LastConnectionTime = Get-Date
 
-    $RetryCount = 0
+    Write-Host "Axcient x360Recover integration initialized successfully"
 
-    # Retry loop for transient API errors
-    do {
-        try {
-            return Invoke-RestMethod @RequestParams
-        } catch {
-            $StatusCode = $null
-
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                $StatusCode = [int] $_.Exception.Response.StatusCode
-            }
-
-            $ExceptionMessage = $_.Exception.Message
-
-            switch ($StatusCode) {
-                429 { # Rate limited — wait 60s before retry
-                    if ($RetryCount -lt $MaxRetries) {
-                        Write-Warning "API rate limit reached. Retrying in 60 seconds... (Attempt $($RetryCount + 1)/$MaxRetries)"
-                        Start-Sleep -Seconds 60
-                        $RetryCount++
-                        continue
-                    }
-                    throw "API rate limit exceeded after $MaxRetries retries: $ExceptionMessage"
-                }
-
-                401 { # Invalid or expired API key
-                    throw "Unauthorized"
-                }
-
-                403 { # Possible DDOS protection — wait 5m before retry
-                    if ($RetryCount -lt $MaxRetries) {
-                        Write-Warning "Access forbidden (possible DDOS protection). Retrying in 5 minutes... (Attempt $($RetryCount + 1)/$MaxRetries)"
-                        Start-Sleep -Seconds 300
-                        $RetryCount++
-                        continue
-                    }
-                    throw "Access forbidden after $MaxRetries retries: $ExceptionMessage"
-                }
-
-                404 { # Endpoint does not exist
-                    throw "Endpoint not found: $Endpoint"
-                }
-
-                504 { # Gateway timeout — wait 60s before retry
-                    if ($RetryCount -lt $MaxRetries) {
-                        Write-Warning "Gateway timeout. Retrying in 60 seconds... (Attempt $($retryCount + 1)/$MaxRetries)"
-                        Start-Sleep -Seconds 60
-                        $RetryCount++
-                        continue
-                    }
-
-                    throw "Gateway timeout after $MaxRetries retries: $ExceptionMessage"
-                }
-
-                default {
-                    throw "API request failed with status $StatusCode : $ExceptionMessage"
-                }
-            }
-        }
-    } while ($RetryCount -lt $MaxRetries)
-}
-
-function Test-AxcientX360RecoverConnection {
-    <#
-    .SYNOPSIS
-        Tests connectivity to the Axcient x360Recover API.
-    .DESCRIPTION
-        Sends a lightweight HEAD request to the organization endpoint to verify
-        that the API key is valid and the service is reachable.
-    .OUTPUTS
-        [bool] $true if the connection succeeds.
-    #>
+    [OpResult]::Ok()
+# ---- Health check: verifies API connectivity and vault status ----
+} -HealthCheck {
     [CmdletBinding()]
+    [OutputType([HealthCheckResult])]
     param()
 
-    try {
-        Invoke-AxcientX360RecoverRestMethod -Method HEAD -Endpoint "organization" | Out-Null
+    Import-Module AxcientX360RecoverAPI
 
-        return $true
-    } catch {
-        throw "$($_.Exception.Message)"
-        return $false
+    if (!(Test-AxcientX360RecoverConnection)) {
+        return New-UnhealthyResult -Message "Unable to connect to the Axcient x360Recover API."
     }
+
+    if (!(Test-AxcientX360RecoverVault)) {
+        return New-UnhealthyResult -Message "The configured Axcient x360Recover Vault ID is either invalid or inactive."
+    }
+
+    Write-Host "Health check passed. Connected to Axcient x360Recover API at $($IntegrationContext.ApiBaseUrl)"
+    Write-Verbose "Last connection: $($IntegrationContext.LastConnectionTime)"
+
+    return New-HealthyResult
 }
 
-function Test-AxcientX360RecoverVault {
-    <#
-    .SYNOPSIS
-        Validates that the configured vault is active.
-    .DESCRIPTION
-        Queries the vault endpoint using the VaultId from $IntegrationContext and
-        checks that its active flag is set to $true.
-    .OUTPUTS
-        [bool] $true if the vault exists and is active; $false otherwise.
-    #>
+# ---- ISupportsListingClients: returns active, non-parked clients ----
+$Integration | Add-DynamicIntegrationCapability -Interface ISupportsListingClients -GetClients {
     [CmdletBinding()]
+    [OutputType([Immybot.Backend.Domain.Providers.IProviderClientDetails[]])]
     param()
 
-    $Endpoint = "vault/$VaultId"
+    Import-Module AxcientX360RecoverAPI
 
-    $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
+    $Clients = Get-AxcientX360RecoverClient
 
-    if (($null -ne $Response.active) -and ($Response.active -eq $true)) {
-        return $true
+    if (($null -ne $Clients) -and ($Clients -is [array])) {
+        foreach ($Client in $Clients) {
+            # Skip parked or inactive clients — only return actively managed ones
+            if (($Client.health_status -notin "PARKED") -and ($Client.active -eq 1)) {
+                New-IntegrationClient -ClientId $Client.id -ClientName $Client.name
+            }
+        }
     } else {
-        return $false
+        return $null
     }
 }
 
-function Get-AxcientX360RecoverClient {
-    <#
-    .SYNOPSIS
-        Retrieves one or all Axcient x360Recover clients.
-    .DESCRIPTION
-        When a ClientId is provided, returns a single client object. Otherwise,
-        returns all clients as an array. Writes an error if the API response is
-        empty or unexpected.
-    .PARAMETER ClientId
-        Optional client ID. If omitted, all clients are returned.
-    .OUTPUTS
-        A single client object or an array of client objects.
-    #>
+# ---- ISupportsListingAgents: returns Windows backup agents for given clients ----
+$Integration | Add-DynamicIntegrationCapability -Interface ISupportsListingAgents -GetAgents {
     [CmdletBinding()]
+    [OutputType([Immybot.Backend.Domain.Providers.IProviderAgentDetails[]])]
     param(
-        [Parameter(Mandatory = $false)]
-        [Nullable[int]] $ClientId = $null
+        [Parameter()]
+        [string[]] $ClientIds = $null
     )
 
-    if ($null -ne $ClientId) {
-        $Endpoint = "client/$ClientId"
+    Import-Module AxcientX360RecoverAPI
 
-        $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
+    $ClientIds | ForEach-Object {
+        $Devices = Get-AxcientX360RecoverDevice -ClientId $_
 
-        if ($null -ne $Response.id) {
-            return $Response
-        } {
-            Write-Error "Failed to get Axcient x360Recover Client: $ClientId"
-            return $null
-        }
-    } else {
-        $Endpoint = "client"
+        if (($null -ne $Devices) -and ($Devices -is [array])) {
+            $Devices | ForEach-Object {
+                # Only Windows devices are supported for ImmyBot management
+                if ($_.os.os_type -ne "WINDOWS") {
+                    continue
+                }
 
-        $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
+                # Extract short hostname (strip domain suffix) and normalize to uppercase
+                $Hostname = (($_.name -split '\.')[0]).ToUpper()
 
-        if (($null -ne $Response) -and ($Response -is [array])) {
-            return $Response
+                New-IntegrationAgent `
+                    -AgentId $_.local_ps_id `
+                    -Name $Hostname `
+                    -ClientId $_.client_id `
+                    -AgentVersion $_.agent_version `
+                    -SupportsRunningScripts $false `
+                    -OSName $_.os.os_name
+            }
         } else {
-            Write-Error "Failed to list Axcient x360Recover Clients."
+            continue
+        }
+    }
+}
+
+# ---- ISupportsInventoryIdentification: reads agent GUID from local config ----
+# Runs on the target device via Invoke-ImmyCommand to extract the unique agent
+# identifier from the Axcient aristos.cfg INI file ([Config] section, GUID key).
+$Integration | Add-DynamicIntegrationCapability -Interface ISupportsInventoryIdentification -GetInventoryScript {
+    [CmdletBinding()]
+    [OutputType([scriptblock])]
+    param()
+
+    Import-Module AxcientX360RecoverAPI
+
+    Invoke-ImmyCommand {
+        $AxcientConfigPath = "C:\Program Files (x86)\Replibit\aristos.cfg"
+
+        if (Test-Path -Path $AxcientConfigPath) {
+            # Copy config to temp to avoid file-lock conflicts with the running agent
+            Copy-Item -Path $AxcientConfigPath -Destination $env:TEMP -Force
+
+            # Open with read-share to prevent locking issues
+            $Stream = [System.IO.File]::Open(
+                "$($env:TEMP)\aristos.cfg",
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::Read
+            )
+
+            $Reader = [System.IO.StreamReader]::new($Stream)
+            $Content = $Reader.ReadToEnd()
+            $Reader.Close()
+            $Stream.Close()
+
+            # Parse INI-style config to locate GUID under the [Config] section
+            $CurrentSection = ""
+            $InTargetSection = $false
+
+            foreach ($Line in $Content -split "`r`n|`n") {
+                $Line = $Line.Trim()
+
+                # Skip blank lines and comments
+                if (($Line -eq "") -or ($Line.StartsWith(";")) -or ($Line.StartsWith("#"))) {
+                    continue
+                }
+
+                # Detect section headers like [Config]
+                if ($Line -match "^\[(.+)\]$") {
+                    $CurrentSection = $Matches[1].Trim()
+                    $InTargetSection = ($CurrentSection -eq "Config")
+
+                    continue
+                }
+
+                # Return the GUID value when found in the [Config] section
+                if ($InTargetSection -and ($Line -match "^([^=]+)=(.*)$")) {
+                    $ParsedKey = $Matches[1].Trim()
+                    $ParsedValue = $Matches[2].Trim()
+
+                    if ($ParsedKey -eq "GUID") {
+                        return $ParsedValue
+                    }
+                }
+            }
+
+            # Remove copy of config to cleanup
+            Remove-Item -Path "$($env:TEMP)\aristos.cfg" -Force
+        } else {
             return $null
         }
     }
+
+    return $null
 }
 
-function Get-AxcientX360RecoverDevice {
-    <#
-    .SYNOPSIS
-        Retrieves Axcient x360Recover devices by client, device ID, or local PS ID.
-    .DESCRIPTION
-        Supports three lookup modes via parameter sets:
-          - ByClientId:  Returns all devices belonging to a client.
-          - ByDeviceId:  Returns a single device by its unique device ID.
-          - ByLocalPsId: Searches for a device by its local_ps_id (agent GUID).
-    .PARAMETER ClientId
-        The client ID whose devices should be listed.
-    .PARAMETER DeviceId
-        The unique device ID to retrieve.
-    .PARAMETER LocalPsId
-        The local_ps_id (agent GUID) used to identify a specific device.
-    .OUTPUTS
-        A single device object or an array of device objects.
-    #>
+# ---- ISupportsTenantInstallToken: retrieves a D2C agent install token ----
+$Integration | Add-DynamicIntegrationCapability -Interface ISupportsTenantInstallToken -GetTenantInstallToken {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = "ByClientId")]
-        [int] $ClientId,
-        [Parameter(Mandatory = $true, ParameterSetName = "ByDeviceId")]
-        [int] $DeviceId,
-        [Parameter(Mandatory = $true, ParameterSetName = "ByLocalPsId")]
-        [string] $LocalPsId
-    )
-
-    switch ($PSCmdlet.ParameterSetName) {
-        "ByClientId" {
-            $Endpoint = "client/$ClientId/device"
-
-            $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
-
-            if (($null -ne $Response) -and ($Response -is [array])) {
-                return $Response
-            } else {
-                Write-Error "Failed to list Axcient x360Recover Client Devices: $ClientId"
-                return $null
-            }
-        }
-        "ByDeviceId" {
-            $Endpoint = "device/$DeviceId"
-
-            $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
-
-            if ($null -ne $Response.id) {
-                return $Response
-            } else {
-                Write-Error "Failed to get Axcient x360Recover Device: $DeviceId"
-            }
-        }
-        "ByLocalPsId" {
-            $Endpoint = "device"
-
-            $QueryParams = @{
-                "local_ps_id" = $LocalPsId
-            }
-
-            $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint -QueryParams $QueryParams
-
-            if (($null -ne $Response) -and ($Response -is [array]) -and ($Response.Count -gt 0)) {
-                return $Response[0]
-            } else {
-                Write-Error "Failed to get Axcient x360Recover Device by Local_Ps_Id: $LocalPsId"
-                return $null
-            }
-        }
-    }
-}
-
-function Get-AxcientX360RecoverAgentToken {
-    <#
-    .SYNOPSIS
-        Provisions a direct-to-cloud (D2C) agent install token for a client.
-    .DESCRIPTION
-        Calls the D2C agent endpoint to generate a one-time install token used
-        during agent deployment. The token ties the agent to the specified client
-        and the vault configured in $IntegrationContext.
-    .PARAMETER ClientId
-        The client ID to provision the install token for.
-    .OUTPUTS
-        [string] The token_id used for agent installation.
-    #>
-    [CmdletBinding()]
+    [OutputType([System.String])]
     param(
         [Parameter(Mandatory = $true)]
-        [int] $ClientId
+        [string] $ClientId
     )
 
-    $Endpoint = "client/$ClientId/vault/$($IntegrationContext.VaultId)/d2c_agent"
+    Import-Module AxcientX360RecoverAPI
 
-    $Response = Invoke-AxcientX360RecoverRestMethod -Method POST -Endpoint $Endpoint
-
-    if ($null -ne $Response.token_id) {
-        return $Response.token_id
-    } else {
-        Write-Error "Failed to get Axcient x360Recover Device Token for Client: $ClientId"
-    }
+    Get-AxcientX360RecoverAgentToken -ClientId $ClientId
 }
 
-function Get-AxcientX360RecoverDynamicVersions {
-    <#
-    .SYNOPSIS
-        Resolves the latest available Axcient agent installer version.
-    .DESCRIPTION
-        Uses ImmyBot's Get-DynamicVersionFromInstallerURL to inspect the MSI
-        download URL and extract version metadata.
-    .OUTPUTS
-        Dynamic version information derived from the installer URL.
-    #>
-    [CmdletBinding()]
-    param()
+# ---- ISupportsDynamicVersions: resolves latest agent installer version ----
+$Integration | Add-DynamicIntegrationCapability -Interface ISupportsDynamicVersions -GetDynamicVersions {
+    Import-Module AxcientX360RecoverAPI
 
-    $DynamicVersion = Get-DynamicVersionFromInstallerURL -URL "https://updates.axcient.cloud/xcloud-agent/agentInstaller.msi"
-
-    return $DynamicVersion.Versions
+    Get-AxcientX360RecoverDynamicVersions
 }
 
-Export-ModuleMember -Function @(
-    'Test-AxcientX360RecoverConnection',
-    'Test-AxcientX360RecoverVault',
-    'Get-AxcientX360RecoverClient',
-    'Get-AxcientX360RecoverDevice',
-    'Get-AxcientX360RecoverAgentToken',
-    'Get-AxcientX360RecoverDynamicVersions'
-)
+return $Integration
