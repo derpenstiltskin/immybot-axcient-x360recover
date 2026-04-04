@@ -248,14 +248,31 @@ function Get-AxcientX360RecoverDevice {
         "ByClientId" {
             $Endpoint = "client/$ClientId/device"
 
-            $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint
+            $Limit = 500
+            $Offset = 0
+            $Devices = @()
 
-            if (($null -ne $Response) -and ($Response -is [array])) {
-                return $Response
-            } else {
-                Write-Error "Failed to list Axcient x360Recover Client Devices: $ClientId"
-                return $null
-            }
+            do {
+                $QueryParams = @{
+                    Limit = $Limit
+                    $Offset = $Offset
+                }
+
+                $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint -QueryParams $QueryParams
+
+                if (($null -ne $Response) -and ($Response -is [array])) {
+                    foreach ($Device in $Response) {
+                        $Devices += $Device # Sorry Kelvin, Immy made me do it :(
+                    }
+
+                    $Offset += $Limit
+                } else {
+                    Write-Error "Failed to list Axcient x360Recover Client Devices: $ClientId"
+                    return $null
+                }
+            } while ($Response.Count -eq $Limit)
+
+            return $Devices
         }
         "ByDeviceId" {
             $Endpoint = "device/$DeviceId"
