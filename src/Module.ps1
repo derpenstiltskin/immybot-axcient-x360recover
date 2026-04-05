@@ -78,10 +78,11 @@ function Invoke-AxcientX360RecoverRestMethod {
             $ExceptionMessage = $_.Exception.Message
 
             switch ($StatusCode) {
-                429 { # Rate limited — wait 60s before retry
+                429 { # Rate limited — exponential backoff
                     if ($RetryCount -lt $MaxRetries) {
-                        Write-Warning "API rate limit reached. Retrying in 60 seconds... (Attempt $($RetryCount + 1)/$MaxRetries)"
-                        Start-Sleep -Seconds 60
+                        $WaitTime = [Math]::Pow(4, $RetryCount)
+                        Write-Warning "API rate limit reached. Retrying in $WaitTime seconds... (Attempt $($RetryCount + 1)/$MaxRetries)"
+                        Start-Sleep -Seconds $WaitTime
                         $RetryCount++
                         continue
                     }
@@ -261,9 +262,7 @@ function Get-AxcientX360RecoverDevice {
                 $Response = Invoke-AxcientX360RecoverRestMethod -Method GET -Endpoint $Endpoint -QueryParams $QueryParams
 
                 if (($null -ne $Response) -and ($Response -is [array])) {
-                    foreach ($Device in $Response) {
-                        $Devices += $Device # Sorry Kelvin, Immy made me do it :(
-                    }
+                    $Devices += $Response # Sorry Kelvin, Immy made me do it :(
 
                     $Offset += $Limit
                 } else {
