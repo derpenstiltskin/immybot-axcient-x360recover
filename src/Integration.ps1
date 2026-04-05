@@ -157,6 +157,9 @@ $Integration | Add-DynamicIntegrationCapability -Interface ISupportsInventoryIde
             $Reader.Close()
             $Stream.Close()
 
+            # Remove copy of config to cleanup
+            Remove-Item -Path "$($env:TEMP)\aristos.cfg" -Force
+
             # Parse INI-style config to locate GUID under the [Config] section
             $CurrentSection = ""
             $InTargetSection = $false
@@ -187,15 +190,10 @@ $Integration | Add-DynamicIntegrationCapability -Interface ISupportsInventoryIde
                     }
                 }
             }
-
-            # Remove copy of config to cleanup
-            Remove-Item -Path "$($env:TEMP)\aristos.cfg" -Force
         } else {
             return $null
         }
     }
-
-    return $null
 }
 
 # ---- ISupportsTenantInstallToken: retrieves a D2C agent install token ----
